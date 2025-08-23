@@ -1,18 +1,30 @@
+#
+# ATENCION
+# ESTA SPIDER SOLO SCRAPEA SITIOS WEBS QUE TENGAN EL <HTML LANG=""> EN INGLES PARA FACILITAR EL SCRIPT DEL INDEXER
+# 
+
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 from collections import deque
 import json
+from pymongo import MongoClient
+
+client = MongoClient()
+
+TEXT_FOUNDED = {}
 
 SEED_URLS = [
+    "https://en.wikipedia.org/wiki/Main_Page",
     "https://www.reddit.com/",
     "https://www.stackoverflow.com/",
     "https://www.github.com/",
     "https://www.nationalgeographic.com/",
     "https://www.britannica.com/",
 ]
-
-POST_ENDPOINT = "http://127.0.0.1:5000/add"
+db = client["sites"]
+sites = db["sites"]
+sites.create_index('link', unique=True)
 
 def is_valid_link(href):
     if not href:
@@ -24,13 +36,26 @@ def is_valid_link(href):
         return False
     return True
 
-def extract_plain_text(soup):
-    body = soup.body
-    if body is None:
-        return ""
-    for script in body(["script", "style", "noscript"]):
-        script.decompose()
-    text = body.get_text(separator=' ', strip=True)
+def jump_line(tag):
+    global TEXT_FOUNDED
+    text = tag.get_text()
+    for i in TEXT_FOUNDED.keys():
+        if text in i:
+            return ""
+    if not text.endswith("\n"):
+        text += "\n"
+    TEXT_FOUNDED[text] = 1
+    return text
+
+def extract_plain_text(soup):  
+    global TEXT_FOUNDED  
+    text = ""
+    for i in soup.find_all():
+        tag_name = i.name
+        match tag_name:
+            case "p":
+                text += jump_line(i)
+    TEXT_FOUNDED = {} 
     return text
 
 def extract_icon_url(soup, base_url):
@@ -46,34 +71,36 @@ def extract_meta_description(soup):
         return meta["content"].strip()
     return ""
 
-def send_json(data, endpoint):
-    
+def save_data(data):
     try:
-        headers = {'Content-Type': 'application/json'}
-        response = requests.post(endpoint, data=json.dumps(data), headers=headers, timeout=5)
-        response.raise_for_status()
-        print(f"Sent to endpoint: {endpoint}")
+        sites.update_one({'link': data['link']}, {'$set': data}, upsert=True)
+        print(f"Data saved")
     except Exception as e:
-        print(f"Failed to send data to endpoint: {e}")
+        print(f"Exception: {e}")
+        
 
-def crawl(seed_urls, max_pages=100, endpoint=POST_ENDPOINT):
+def crawl(seed_urls, max_pages=100):
     queue = deque(seed_urls)
-    visited = set()
     count = 0
-
     while queue and count < max_pages:
         url = queue.popleft()
-        if url in visited:
+        existing = sites.find_one({'link': url, 'scrapped': True})
+        if existing:
             continue
-        visited.add(url)
         print(f"Crawling: {url}")
         try:
             response = requests.get(url, timeout=5)
             if not response.headers.get('content-type', '').startswith('text/html'):
                 continue
-            soup = BeautifulSoup(response.text, 'html.parser')
+            soup = BeautifulSoup(response.text, 'html.parser', from_encoding='utf-8')
+            
+            # VERIFICAR EN <HTML> si LANG="EN"
+            lang = soup.select_one('html')
+            if lang and lang.get('lang') not in ('en', 'en-US'):
+                continue
+            
             plain_text = extract_plain_text(soup)
-            title = soup.title.string.strip() if soup.title and soup.title.string else ""
+            title = soup.title.string if soup.title else ""
             icon = extract_icon_url(soup, url)
             
             info = ""
@@ -85,23 +112,30 @@ def crawl(seed_urls, max_pages=100, endpoint=POST_ENDPOINT):
                 "title": title,
                 "link": url,
                 "icon": icon,
-                "info": info
+                "info": info,
+                "quality": 0,
+                "indexed": False,
+                "scrapped": True
             }
             
-            
-            print(json.dumps(data, ensure_ascii=False))
-            send_json(data, endpoint)
+            save_data(data)
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if is_valid_link(href):
                     next_url = urljoin(url, href)
                     next_url = next_url.split('#')[0]
-                    if next_url not in visited:
-                        queue.append(next_url)
+                    sites.update_one(
+                        {'link': next_url},
+                        {'$inc': {'quality': 0.01}},
+                        upsert=True
+                    )
+                    queue.append(next_url)
             count += 1
         except Exception as e:
             print(f"Failed to crawl {url}: {e}")
     print(f"Total pages crawled: {count}")
 
+
+# Empezar a buscar sitios webs y solo guardar 5.
 if __name__ == "__main__":
-    crawl(SEED_URLS, 1000, POST_ENDPOINT)
+    crawl(SEED_URLS, 5)

@@ -12,11 +12,6 @@ const route = useRoute()
 const searchTerms = ref(route.params.searchTerm)
 
 const data = reactive({records:{
-  page:0,
-  page_size:0,
-  pages:0,
-  results:[],
-  total: 0
 }}) 
 
 const fetchData = async()=>{
@@ -39,7 +34,7 @@ onMounted(()=>fetchData())
   <div>
     <SearchBarComponent/>
     <br>
-    <ResultComponent class="ml-4 mr-4" v-for="record in data.records.results" :data="record"/>
+    <ResultComponent class="ml-4 mr-4" v-for="record in data.records" :data="record"/>
     <br><br>
   </div>
 </template>
